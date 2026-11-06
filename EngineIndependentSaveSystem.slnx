@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="EngineIndependentSaveSystem.csproj" />
+  <Project Path="EngineIndependentSaveSystem.Tests\EngineIndependentSaveSystem.Tests.csproj" />
+</Solution>
