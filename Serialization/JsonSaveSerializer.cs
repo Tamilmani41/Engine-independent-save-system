@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using EngineIndependentSaveSystem.Abstractions;
 
 namespace EngineIndependentSaveSystem.Serialization;
@@ -6,7 +7,12 @@ namespace EngineIndependentSaveSystem.Serialization;
 /// <summary>A generic, human-readable JSON serializer for save data.</summary>
 public sealed class JsonSaveSerializer : ISaveSerializer
 {
-    private static readonly JsonSerializerOptions Options = new() { WriteIndented = true };
+    private static readonly JsonSerializerOptions Options = new()
+    {
+        WriteIndented = true,
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+        RespectRequiredConstructorParameters = true
+    };
 
     public string Serialize<T>(T data)
     {

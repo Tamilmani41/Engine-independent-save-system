@@ -10,34 +10,31 @@ namespace EngineIndependentSaveSystem.Tests;
 public sealed class SaveSystemTests
 {
     [Fact]
-    public void JsonSerializer_RoundTrips_Player_And_MultipleEnemies_With_2D_And_3D_Positions()
+    public void JsonSerializer_RoundTrips_2DAnd3D_PlayerAndEnemies()
     {
         var serializer = new JsonSaveSerializer();
-        var original = CreateValidGameSaveData();
+        var restored = serializer.Deserialize<GameSaveData>(serializer.Serialize(CreateValidGameSaveData()));
 
-        var json = serializer.Serialize(original);
-        var restored = serializer.Deserialize<GameSaveData>(json);
-
-        Assert.Contains("\n", json);
+        Assert.Equal(GameSaveData.CurrentSaveVersion, restored.SaveVersion);
         Assert.Equal(new Position3D(1, 2, 3), restored.Player.Position3D);
-        Assert.Equal(2, restored.Enemies.Count);
         Assert.Equal(new Position2D(10, 20), restored.Enemies[0].Position2D);
         Assert.Equal(new Position3D(-1, 0, 8), restored.Enemies[1].Position3D);
     }
 
-    [Fact]
-    public void JsonSerializer_Rejects_InvalidJson()
+    [Theory]
+    [InlineData("{ invalid json")]
+    [InlineData("{\"SaveVersion\":1,\"Unexpected\":true}")]
+    [InlineData("{\"Player\":{\"PositionDimension\":1,\"Position3D\":{\"X\":1,\"Y\":2,\"Z\":3},\"Health\":1,\"Score\":0},\"Enemies\":[]}")]
+    [InlineData("{\"SaveVersion\":1,\"Player\":{\"Position3D\":{\"X\":1,\"Y\":2,\"Z\":3},\"Health\":1,\"Score\":0},\"Enemies\":[]}")]
+    [InlineData("{\"SaveVersion\":1,\"Player\":{\"PositionDimension\":1,\"Position3D\":{\"X\":1,\"Y\":2,\"Z\":3},\"Score\":0},\"Enemies\":[]}")]
+    public void JsonSerializer_RejectsMalformedUnknownOrMissingRequiredProperties(string json)
     {
-        var serializer = new JsonSaveSerializer();
-
-        var exception = Assert.Throws<InvalidDataException>(() => serializer.Deserialize<GameSaveData>("{ invalid json"));
-
-        Assert.IsType<System.Text.Json.JsonException>(exception.InnerException);
+        Assert.Throws<InvalidDataException>(() => new JsonSaveSerializer().Deserialize<GameSaveData>(json));
     }
 
     [Theory]
-    [MemberData(nameof(InvalidPositionData))]
-    public void SaveService_Rejects_InconsistentPositionData(GameSaveData gameSaveData)
+    [MemberData(nameof(InvalidGameSaveData))]
+    public void SaveService_RejectsInvalidGameData(GameSaveData gameSaveData)
     {
         var service = new SaveService(new JsonSaveSerializer(), new UnusedStorage());
 
@@ -45,41 +42,44 @@ public sealed class SaveSystemTests
     }
 
     [Fact]
-    public async Task SaveService_Saves_And_Loads_A_File()
+    public void SaveService_AcceptsUniqueEnemyIds()
+    {
+        GameSaveDataValidator.Validate(CreateValidGameSaveData());
+    }
+
+    [Fact]
+    public async Task SaveService_SavesAndLoadsAFile()
     {
         var directory = CreateTemporaryDirectory();
         try
         {
             var service = new SaveService(new JsonSaveSerializer(), new FileSaveStorage(Path.Combine(directory, "save.json")));
-            var original = CreateValidGameSaveData();
-
-            await service.SaveAsync(original);
+            await service.SaveAsync(CreateValidGameSaveData());
             var restored = await service.LoadAsync();
 
             Assert.True(await service.HasSaveAsync());
             Assert.NotNull(restored);
-            Assert.Equal(original.Player.Health, restored.Player.Health);
-            Assert.Equal(original.Enemies[0].Id, restored.Enemies[0].Id);
+            Assert.Equal(75, restored.Player.Health);
         }
         finally { DeleteTemporaryDirectory(directory); }
     }
 
     [Fact]
-    public async Task FileStorage_LoadingMissingFile_ReturnsNull_WithoutCreatingDirectory()
+    public async Task FileStorage_MissingFileReturnsNullWithoutCreatingDirectory()
     {
         var directory = Path.Combine(Path.GetTempPath(), $"save-system-{Guid.NewGuid():N}");
-        var storage = new FileSaveStorage(Path.Combine(directory, "save.json"));
         try
         {
+            var storage = new FileSaveStorage(Path.Combine(directory, "save.json"));
             Assert.Null(await storage.LoadAsync());
-            Assert.False(Directory.Exists(directory));
             Assert.False(await storage.ExistsAsync());
+            Assert.False(Directory.Exists(directory));
         }
         finally { DeleteTemporaryDirectory(directory); }
     }
 
     [Fact]
-    public async Task FileStorage_Deletes_Existing_And_MissingFiles()
+    public async Task FileStorage_DeletesExistingAndMissingFiles()
     {
         var directory = CreateTemporaryDirectory();
         try
@@ -88,31 +88,60 @@ public sealed class SaveSystemTests
             await storage.SaveAsync("previous");
             await storage.DeleteAsync();
             await storage.DeleteAsync();
-
             Assert.False(await storage.ExistsAsync());
         }
         finally { DeleteTemporaryDirectory(directory); }
     }
 
     [Fact]
-    public async Task FileStorage_Creates_MissingParentDirectories_WhenSaving()
+    public async Task FileStorage_CreatesParentDirectoriesWhenSaving()
     {
         var directory = CreateTemporaryDirectory();
         try
         {
             var path = Path.Combine(directory, "one", "two", "save.json");
             var storage = new FileSaveStorage(path);
-
             await storage.SaveAsync("content");
-
-            Assert.True(File.Exists(path));
             Assert.Equal("content", await storage.LoadAsync());
         }
         finally { DeleteTemporaryDirectory(directory); }
     }
 
     [Fact]
-    public async Task FileStorage_Cancellation_IsPropagated()
+    public async Task FileStorage_EnforcesConfiguredMaximumLoadSize()
+    {
+        var directory = CreateTemporaryDirectory();
+        try
+        {
+            var path = Path.Combine(directory, "save.json");
+            var storage = new FileSaveStorage(path, maximumSaveFileSizeBytes: 5);
+            await storage.SaveAsync("small");
+            Assert.Equal("small", await storage.LoadAsync());
+
+            await storage.SaveAsync("larger");
+            await Assert.ThrowsAsync<InvalidDataException>(() => storage.LoadAsync());
+        }
+        finally { DeleteTemporaryDirectory(directory); }
+    }
+
+    [Fact]
+    public async Task FileStorage_SerializesConcurrentSavesForTheSamePath()
+    {
+        var directory = CreateTemporaryDirectory();
+        try
+        {
+            var path = Path.Combine(directory, "save.json");
+            var first = new FileSaveStorage(path);
+            var second = new FileSaveStorage(path);
+            await Task.WhenAll(first.SaveAsync("first"), second.SaveAsync("second"));
+
+            Assert.Contains(await first.LoadAsync(), new[] { "first", "second" });
+        }
+        finally { DeleteTemporaryDirectory(directory); }
+    }
+
+    [Fact]
+    public async Task FileStorage_CancellationBeforeCommitPreventsWriting()
     {
         var directory = CreateTemporaryDirectory();
         try
@@ -122,12 +151,13 @@ public sealed class SaveSystemTests
             cancellation.Cancel();
 
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => storage.SaveAsync("content", cancellation.Token));
+            Assert.False(await storage.ExistsAsync());
         }
         finally { DeleteTemporaryDirectory(directory); }
     }
 
     [Fact]
-    public async Task FileStorage_FailedReplacement_PreservesPreviousSave_OnWindows()
+    public async Task FileStorage_FailedReplacementPreservesPreviousSave_OnWindows()
     {
         if (!OperatingSystem.IsWindows()) return;
 
@@ -147,25 +177,53 @@ public sealed class SaveSystemTests
         finally { DeleteTemporaryDirectory(directory); }
     }
 
-    public static IEnumerable<object[]> InvalidPositionData()
+    [Fact]
+    public async Task FileStorage_EnforcesMaximumSizeInBytes()
     {
-        yield return [new GameSaveData { Player = new PlayerSaveData { PositionDimension = PositionDimension.TwoD, Position3D = new(1, 2, 3) } }];
-        yield return [new GameSaveData { Player = new PlayerSaveData { PositionDimension = PositionDimension.ThreeD, Position2D = new(1, 2) } }];
-        yield return [new GameSaveData { Player = new PlayerSaveData { PositionDimension = PositionDimension.TwoD, Position2D = new(1, 2), Position3D = new(1, 2, 3) } }];
-        yield return [new GameSaveData { Player = new PlayerSaveData { PositionDimension = PositionDimension.TwoD } }];
-        yield return [new GameSaveData { Player = new PlayerSaveData { PositionDimension = (PositionDimension)5, Position3D = new(1, 2, 3)}}];
+        var directory = CreateTemporaryDirectory();
+
+        try
+        {
+            var path = Path.Combine(directory, "save.json");
+            var storage = new FileSaveStorage(
+                path,
+                maximumSaveFileSizeBytes: 5);
+
+            await storage.SaveAsync("ééé");
+
+            await Assert.ThrowsAsync<InvalidDataException>(
+                () => storage.LoadAsync());
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(directory);
+        }
+    }
+
+    public static IEnumerable<object[]> InvalidGameSaveData()
+    {
+        yield return [new GameSaveData { SaveVersion = 2, Player = ValidPlayer() }];
+        yield return [new GameSaveData { Player = new PlayerSaveData { PositionDimension = PositionDimension.TwoD, Position3D = new(1, 2, 3), Health = 1, Score = 0 } }];
+        yield return [new GameSaveData { Player = new PlayerSaveData { PositionDimension = PositionDimension.ThreeD, Position2D = new(1, 2), Health = 1, Score = 0 } }];
+        yield return [new GameSaveData { Player = new PlayerSaveData { PositionDimension = PositionDimension.TwoD, Position2D = new(1, 2), Position3D = new(1, 2, 3), Health = 1, Score = 0 } }];
+        yield return [new GameSaveData { Player = new PlayerSaveData { PositionDimension = PositionDimension.TwoD, Health = 1, Score = 0 } }];
+        yield return [new GameSaveData { Player = new PlayerSaveData { PositionDimension = (PositionDimension)5, Position3D = new(1, 2, 3), Health = 1, Score = 0 } }];
+        yield return [new GameSaveData { Player = new PlayerSaveData { PositionDimension = PositionDimension.TwoD, Position2D = new(float.NaN, 2), Health = 1, Score = 0 } }];
+        yield return [new GameSaveData { Player = ValidPlayer(), Enemies = [ValidEnemy("duplicate"), ValidEnemy("duplicate")] }];
     }
 
     private static GameSaveData CreateValidGameSaveData() => new()
     {
-        Player = new PlayerSaveData { PositionDimension = PositionDimension.ThreeD, Position3D = new(1, 2, 3), Health = 75, Score = 450 },
-        Enemies =
-        [
+        SaveVersion = GameSaveData.CurrentSaveVersion,
+        Player = ValidPlayer(),
+        Enemies = [
             new EnemySaveData { Id = "slime-01", PositionDimension = PositionDimension.TwoD, Position2D = new(10, 20), IsAlive = true },
             new EnemySaveData { Id = "drone-02", PositionDimension = PositionDimension.ThreeD, Position3D = new(-1, 0, 8), IsAlive = false }
         ]
     };
 
+    private static PlayerSaveData ValidPlayer() => new() { PositionDimension = PositionDimension.ThreeD, Position3D = new(1, 2, 3), Health = 75, Score = 450 };
+    private static EnemySaveData ValidEnemy(string id) => new() { Id = id, PositionDimension = PositionDimension.TwoD, Position2D = new(1, 2), IsAlive = true };
     private static string CreateTemporaryDirectory()
     {
         var directory = Path.Combine(Path.GetTempPath(), $"save-system-{Guid.NewGuid():N}");

@@ -1,26 +1,31 @@
 # Engine-independent save system
 
-This .NET 10 library saves a small game state without Unity, Godot, Unreal, or engine vector types.
+This .NET 10 library stores a small game state without Unity, Godot, Unreal, or engine vector types.
 
-## Architecture
+## Structure
 
-- `Models/` contains JSON-compatible game data.
-- `Abstractions/` defines string serialization and storage contracts.
-- `Serialization/JsonSaveSerializer` is a generic `System.Text.Json` serializer.
-- `Storage/FileSaveStorage` handles one file and safe writes.
+- `Models/` defines JSON-compatible save data.
+- `Abstractions/` defines serialization and storage contracts.
+- `Serialization/JsonSaveSerializer` provides generic, formatted JSON.
+- `Storage/FileSaveStorage` provides bounded, file-based storage.
 - `Services/SaveService` coordinates validation, serialization, and storage.
 
-Every entity records `PositionDimension`. It has exactly one matching coordinate property: `Position2D` for `TwoD`, or `Position3D` for `ThreeD`. `SaveService` validates this rule before saving and after loading; the generic JSON serializer has no game-model rules.
+## Save format and validation
+
+`GameSaveData.SaveVersion` is required and must equal `1`. Future schema changes must increment the version; migrations are deliberately outside V1.
+
+JSON is strict: unknown properties, missing required properties, malformed JSON, and unsupported constructor data are rejected. A saved player/enemy must declare `PositionDimension` and contain exactly one matching coordinate object: `Position2D` for `TwoD`, or `Position3D` for `ThreeD`. Coordinates must be finite, enemy IDs must be non-empty and unique using ordinal comparison, and unsupported versions are rejected. Health and score have no library-imposed domain range.
 
 ## Usage
 
 ```csharp
-var serializer = new JsonSaveSerializer();
-var storage = new FileSaveStorage("saves/game.json");
-var saves = new SaveService(serializer, storage);
+var saves = new SaveService(
+    new JsonSaveSerializer(),
+    new FileSaveStorage("saves/game.json"));
 
 await saves.SaveAsync(new GameSaveData
 {
+    SaveVersion = GameSaveData.CurrentSaveVersion,
     Player = new PlayerSaveData
     {
         PositionDimension = PositionDimension.ThreeD,
@@ -29,12 +34,18 @@ await saves.SaveAsync(new GameSaveData
         Score = 0
     }
 });
-
-GameSaveData? loaded = await saves.LoadAsync();
 ```
 
-`LoadAsync` returns `null` only when no save exists. Malformed JSON and invalid game data throw meaningful exceptions.
+## Storage behavior
 
-## File-write behavior
+`FileSaveStorage` accepts a trusted application path. It uses a 10 MB maximum load size by default; configure another positive byte limit with `new FileSaveStorage(path, maximumSaveFileSizeBytes)`. The limit is checked before the complete file is read into memory. Missing files return `null`; access and I/O failures propagate.
 
-Writes go to a uniquely named temporary file in the destination directory, are flushed and closed, then committed with `File.Replace` (when replacing an existing save) or `File.Move` (for a first save). Keeping both files in one directory gives the strongest replacement guarantees the filesystem supports. Atomicity varies by operating system and filesystem; `File.Replace` can also report a platform/filesystem error rather than silently degrading the operation. A failed temporary write does not touch the existing save.
+Writes use a uniquely named temporary file in the destination directory, flush and close it, then commit with `File.Replace` for replacement or `File.Move` for a first save. This preserves the previous save if temporary writing fails. A process crash can leave a temporary file; V1 intentionally does not perform stale-file recovery.
+
+Operations through `FileSaveStorage` instances targeting the same normalized path are serialized within this process. Cross-process synchronization, symlink alias coordination, and crash recovery are not guaranteed. Replacement atomicity and `File.Replace` support depend on the operating system and filesystem; failures are propagated rather than silently weakened.
+
+Cancellation is cooperative. It is honored before and during temporary-file writing and up to the check immediately before replacement—the commit point. Cancellation after that point does not roll back a committed save.
+
+## Deliberately deferred from V1
+
+Cloud storage, encryption, compression, backup slots, autosave, migrations, stale-temp recovery, cross-process locking, and game-engine adapters.
